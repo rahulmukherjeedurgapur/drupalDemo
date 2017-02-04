@@ -1,0 +1,67 @@
+<?php
+
+/**
+ * @file
+ * Install and uninstall functions for the commerce referral discount module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function commerce_referral_discount_schema() {
+  $schema['commerce_referral_discount'] = array(
+    'fields' => array(
+      'uid' => array(
+        'description' => 'The {users}.uid of the user who was invited.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'referrer_uid' => array(
+        'description' => 'The {users}.uid of the referrer.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+      ),
+      'discount_amount' => array(
+        'description' => 'Discount Amount',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'type' => array(
+        'description' => 'The type referral discount usage.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'created' => array(
+        'description' => 'The Unix timestamp when the discount was created.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'updated' => array(
+        'description' => 'The Unix timestamp when the discount was updated.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'indexes' => array(
+      'referral_index' => array('type', 'uid'),
+    ),
+  );
+  return $schema;
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function commerce_referral_discount_uninstall() {
+  // Remove tables.
+  drupal_uninstall_schema('commerce_referral_discount');
+
+  variable_del('commerce_referral_discount_signup');
+  variable_del('commerce_referral_discount_referral_purchase');
+}

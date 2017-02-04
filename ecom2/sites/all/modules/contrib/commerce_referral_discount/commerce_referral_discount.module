@@ -1,0 +1,284 @@
+<?php
+
+/**
+ * @file
+ * This file includes main functionalities of invite page.
+ */
+
+/**
+ * Implements hook_help().
+ */
+function commerce_referral_discount_help($path) {
+  switch ($path) {
+    // Main module help for this module.
+    case 'admin/help#referral_discount_help':
+      return '<p>' . t('This module gives a way to provide a discount to a user for referring other users to your commerce site. The implementation is pretty simple.') . '</p>';
+  }
+}
+
+/**
+ * Implements hook_permission().
+ */
+function commerce_referral_discount_permission() {
+  return array(
+    'commerce referral discount' => array(
+      'title' => t('Administer referral discount'),
+      'description' => t('Allows users to update discount amount. Warning: Give to trusted roles only.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_referral_discount_menu() {
+  $items = array();
+
+  $items['invite/%'] = array(
+    'title'            => 'User Referral',
+    'description'      => 'Settings for the User Referral module.',
+    'page callback'    => 'commerce_referral_discount_redirect',
+    'page arguments'   => array(1),
+    'access arguments' => array('access content'),
+  );
+
+  // Menu item for module configurations.
+  $items['admin/config/referral-discount'] = array(
+    'title' => 'Commerce Referral Discount Configuration',
+    'description' => 'Configure referral discount amount.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_referral_discount_config_form'),
+    'access arguments' => array('commerce referral discount'),
+    'file' => 'commerce_referral_discount.admin.inc',
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function commerce_referral_discount_block_info() {
+  $block['referral_block'] = array(
+    'info' => t('Invite/Referral Link'),
+  );
+  return $block;
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function commerce_referral_discount_block_view($delta = '') {
+  $block = array();
+
+  switch ($delta) {
+    case 'referral_block':
+      $block['content'] = commerce_referral_discount_invite_link();
+      break;
+  }
+  return $block;
+}
+
+/**
+ * Custom invitation link.
+ */
+function commerce_referral_discount_invite_link() {
+  global $base_url;
+  global $user;
+
+  $content = array();
+  if (isset($user->name)) {
+    $url = $base_url . '/invite/' . $user->name;
+    $content['block_content'] = array(
+      '#type' => 'markup',
+      '#markup' => '<span class="invite-link">' . $url . '</span>',
+    );
+  }
+  return $content;
+}
+
+/**
+ * Function to check user logged in or not.
+ */
+function commerce_referral_discount_redirect($username) {
+  if (user_is_logged_in()) {
+    drupal_goto('<front>');
+  }
+  else {
+    $user = user_load_by_name($username);
+    $ref_uid = $user->uid;
+    $_SESSION['ref_user_uid'] = $ref_uid;
+    drupal_goto('/user/register');
+  }
+}
+
+/**
+ * Implements hook_user_insert().
+ */
+function commerce_referral_discount_user_insert(&$edit, $account, $category) {
+  if (isset($_SESSION['ref_user_uid'])) {
+    $ref_uid = $_SESSION['ref_user_uid'];
+    $discount_signup = variable_get('commerce_referral_discount_signup');
+    $discount_amount = isset($discount_signup) ? $discount_signup : 0;
+    db_insert('commerce_referral_discount')
+      ->fields(array(
+        'uid' => $account->uid,
+        'referrer_uid' => $ref_uid,
+        'discount_amount' => $discount_amount,
+        'type' => 'register',
+        'created' => REQUEST_TIME,
+      ))
+      ->execute();
+    unset($_SESSION['ref_user_uid']);
+  }
+}
+
+/**
+ * Implements hook_commerce_discount_offer_type_info().
+ */
+function commerce_referral_discount_commerce_discount_offer_type_info() {
+  $types = array();
+  $types['referral_discount'] = array(
+    'label' => 'Referral Discount',
+    'action' => 'commerce_referral_discount_amount',
+    'entity types' => array('commerce_order'),
+  );
+  return $types;
+}
+
+/**
+ * Apply referral amount discount.
+ */
+function commerce_referral_discount_amount(EntityDrupalWrapper $wrapper, $discount_name) {
+  $discount_wrapper = entity_metadata_wrapper('commerce_discount', $discount_name);
+  $order = $wrapper->value();
+  $delta = $wrapper->commerce_discounts->count();
+  $uid = $order->uid;
+
+  $result = db_select('commerce_referral_discount', 'discount')
+    ->fields('discount', array('discount_amount'))
+    ->condition('discount.uid', $uid, '=')
+    ->execute()
+    ->fetchAssoc();
+
+  if (isset($result['discount_amount']) && $result['discount_amount'] >= 0) {
+    $discount_amount = $result['discount_amount'] * -100;
+  }
+  else {
+    return;
+  }
+  // If the discount will bring the order to less than zero, set the
+  // discount amount so that it stops at zero.
+  $order_amount = $wrapper->commerce_order_total->amount->value();
+  if (-$discount_amount > $order_amount) {
+    $discount_amount = -$order_amount;
+    $_SESSION['discount_amount'] = $discount_amount;
+  }
+
+  $discount_price = array(
+    'amount' => $discount_amount,
+    'currency_code' => $wrapper->commerce_order_total->currency_code->value(),
+  );
+
+  $order->commerce_discounts[LANGUAGE_NONE][$delta]['target_id'] = $discount_wrapper->discount_id->value();
+
+  // Modify the existing discount line item or add a new one if that fails.
+  if (!commerce_discount_set_existing_line_item_price($wrapper, $discount_name, $discount_price)) {
+    commerce_discount_add_line_item($wrapper, $discount_name, $discount_price);
+  }
+  commerce_order_calculate_total($order);
+}
+
+/**
+ * Implements hook_commerce_order_presave().
+ */
+function commerce_referral_discount_commerce_order_presave($order) {
+  if ($order->status == 'pending' && $order->original->status == 'pending') {
+    $uid = $order->uid;
+    $result = db_select('commerce_referral_discount', 'discount')
+      ->fields('discount', array('uid', 'referrer_uid',
+        'discount_amount', 'type',
+      ))
+      ->condition('discount.uid', $uid, '=')
+      ->execute()
+      ->fetchAssoc();
+
+    if (isset($result['uid'])) {
+      $order_total = $order->commerce_order_total[LANGUAGE_NONE][0]['amount'];
+      if ($order_total > 0) {
+        $result['discount_amount'] = 0;
+      }
+      else {
+        $discount_amount = -$_SESSION['discount_amount'] / 100;
+        $result['discount_amount'] = $result['discount_amount'] - $discount_amount;
+      }
+
+      switch ($result['type']) {
+        // Create or update referrer user with discount amount.
+        case 'register':
+          $referrer_result = db_select('commerce_referral_discount', 'discount')
+            ->fields('discount', array('uid', 'discount_amount', 'type'))
+            ->condition('discount.uid', $result['referrer_uid'], '=')
+            ->execute()
+            ->fetchAssoc();
+
+          if (isset($referrer_result['uid'])) {
+            $discount = $referrer_result['discount_amount'] + variable_get('commerce_referral_discount_referral_purchase');
+            db_update('commerce_referral_discount')
+              ->fields(array(
+                'uid' => $result['referrer_uid'],
+                'discount_amount' => $discount,
+                'updated' => REQUEST_TIME,
+              ))
+              ->condition('uid', $result['referrer_uid'], '=')
+              ->execute();
+          }
+          else {
+            $discount_referral_purchase = variable_get('commerce_referral_discount_referral_purchase');
+            $discount = isset($discount_referral_purchase) ? $discount_referral_purchase : 0;
+            db_insert('commerce_referral_discount')
+              ->fields(array(
+                'uid' => $result['referrer_uid'],
+                'referrer_uid' => NULL,
+                'discount_amount' => $discount,
+                'type' => 'purchase',
+                'created' => REQUEST_TIME,
+              ))
+              ->execute();
+          }
+
+          // Delete the register type user to avoid second time purchase
+          // discount benefit.
+          db_delete('commerce_referral_discount')
+            ->condition('uid', $result['uid'])
+            ->condition('type', 'register')
+            ->execute();
+          break;
+
+        // Update referrer discount amount.
+        case 'purchase':
+          db_update('commerce_referral_discount')
+            ->fields(array(
+              'uid' => $result['uid'],
+              'referrer_uid' => NULL,
+              'discount_amount' => $result['discount_amount'],
+              'type' => 'purchase',
+              'updated' => REQUEST_TIME,
+            ))
+            ->condition('uid', $result['uid'], '=')
+            ->condition('type', 'purchase', '=')
+            ->execute();
+          break;
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_views_api().
+ */
+function commerce_referral_discount_views_api() {
+  return array(
+    'api' => 3,
+    'path' => drupal_get_path('module', 'commerce_referral_discount') . '/includes/views',
+  );
+}
